@@ -8,10 +8,12 @@ from __future__ import annotations
 
 from typing import Any
 
+from .builtin_tool_plugin_list_files import get_builtin_list_files_tool_plugins
 from .tool_defs import TOOL_DEFINITIONS
 from .tool_registry import ToolPlugin, tool
 
 BUILTIN_TOOL_PLUGINS: list[ToolPlugin] = []
+BUILTIN_TOOL_PLUGINS.extend(get_builtin_list_files_tool_plugins())
 
 _DEF_BY_NAME = {d["name"]: d for d in TOOL_DEFINITIONS}
 
@@ -33,17 +35,6 @@ def _schema(name: str) -> dict[str, Any]:
 def think_tool(args: dict[str, Any], _ctx: Any) -> str:
     note = str(args.get("note", ""))
     return f"Thought noted: {note}"
-
-
-@tool(
-    name="list_files",
-    description=_desc("list_files"),
-    parameters_schema=_schema("list_files"),
-    collector=BUILTIN_TOOL_PLUGINS,
-)
-def list_files_tool(args: dict[str, Any], ctx: Any) -> str:
-    glob = args.get("glob")
-    return ctx.tools.list_files(glob=str(glob) if glob else None)
 
 
 @tool(
@@ -248,7 +239,48 @@ def kill_shell_bg_tool(args: dict[str, Any], ctx: Any) -> str:
     return ctx.tools.kill_shell_bg(int(raw_id))
 
 
+@tool(
+    name="subtask",
+    description=_desc("subtask"),
+    parameters_schema=_schema("subtask"),
+    collector=BUILTIN_TOOL_PLUGINS,
+)
+def subtask_tool(args: dict[str, Any], ctx: Any) -> str:
+    return ctx._registry_subtask(args, ctx)
+
+
+@tool(
+    name="execute",
+    description=_desc("execute"),
+    parameters_schema=_schema("execute"),
+    collector=BUILTIN_TOOL_PLUGINS,
+)
+def execute_tool(args: dict[str, Any], ctx: Any) -> str:
+    return ctx._registry_execute(args, ctx)
+
+
+@tool(
+    name="list_artifacts",
+    description=_desc("list_artifacts"),
+    parameters_schema=_schema("list_artifacts"),
+    collector=BUILTIN_TOOL_PLUGINS,
+)
+def list_artifacts_tool(args: dict[str, Any], ctx: Any) -> str:
+    return ctx._registry_list_artifacts(args, ctx)
+
+
+@tool(
+    name="read_artifact",
+    description=_desc("read_artifact"),
+    parameters_schema=_schema("read_artifact"),
+    collector=BUILTIN_TOOL_PLUGINS,
+)
+def read_artifact_tool(args: dict[str, Any], ctx: Any) -> str:
+    return ctx._registry_read_artifact(args, ctx)
+
+
 def get_builtin_tool_plugins() -> list[ToolPlugin]:
     """Return decorator-collected built-in tool plugins."""
-    return list(BUILTIN_TOOL_PLUGINS)
-
+    order = [d["name"] for d in TOOL_DEFINITIONS]
+    by_name = {plugin.definition.name: plugin for plugin in BUILTIN_TOOL_PLUGINS}
+    return [by_name[name] for name in order if name in by_name]

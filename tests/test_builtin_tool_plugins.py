@@ -10,7 +10,7 @@ class BuiltinToolPluginsTests(unittest.TestCase):
     def test_builtin_plugin_count_and_names(self) -> None:
         plugins = get_builtin_tool_plugins()
         names = [p.definition.name for p in plugins]
-        self.assertEqual(len(plugins), 16)
+        self.assertEqual(len(plugins), 20)
         expected = {
             "think",
             "list_files",
@@ -28,6 +28,10 @@ class BuiltinToolPluginsTests(unittest.TestCase):
             "run_shell_bg",
             "check_shell_bg",
             "kill_shell_bg",
+            "subtask",
+            "execute",
+            "list_artifacts",
+            "read_artifact",
         }
         self.assertEqual(set(names), expected)
 
@@ -49,6 +53,5 @@ class BuiltinToolPluginsTests(unittest.TestCase):
         b = get_builtin_tool_plugins()
         self.assertIsNot(a, b)
         a.pop()
-        self.assertEqual(len(b), 16)
-        self.assertEqual(len(get_builtin_tool_plugins()), 16)
-
+        self.assertEqual(len(b), 20)
+        self.assertEqual(len(get_builtin_tool_plugins()), 20)

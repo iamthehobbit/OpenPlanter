@@ -140,16 +140,40 @@ class ToolRegistry:
             raise KeyError(f"Cannot register handler for unknown tool: {name}")
         self._handlers[name] = handler
 
-    def register_plugin(self, plugin: ToolPlugin) -> None:
-        """Register a plugin's definition (if needed) and handler."""
-        if plugin.definition.name not in self._tools:
-            self.register_definition_obj(plugin.definition)
-        self._handlers[plugin.definition.name] = plugin.handler
+    def register_plugin(self, plugin: ToolPlugin, *, allow_handler_override: bool = False) -> None:
+        """Register a plugin's definition and handler.
 
-    def register_plugins(self, plugins: list[ToolPlugin]) -> None:
+        Duplicate plugin names are rejected by default to avoid accidental
+        handler replacement. Pass ``allow_handler_override=True`` only when an
+        intentional override is desired and the definition metadata matches the
+        existing definition exactly.
+        """
+        name = plugin.definition.name
+        if name not in self._tools:
+            self.register_definition_obj(plugin.definition)
+            self._handlers[name] = plugin.handler
+            return
+
+        existing = self._tools[name]
+        new_def = plugin.definition
+        if (
+            existing.description != new_def.description
+            or existing.parameters != new_def.parameters
+        ):
+            raise ValueError(f"Conflicting duplicate tool plugin definition: {name}")
+        if not allow_handler_override:
+            raise ValueError(f"Duplicate tool plugin registration: {name}")
+        self._handlers[name] = plugin.handler
+
+    def register_plugins(
+        self,
+        plugins: list[ToolPlugin],
+        *,
+        allow_handler_override: bool = False,
+    ) -> None:
         """Register multiple plugins."""
         for plugin in plugins:
-            self.register_plugin(plugin)
+            self.register_plugin(plugin, allow_handler_override=allow_handler_override)
 
     def try_invoke(
         self,

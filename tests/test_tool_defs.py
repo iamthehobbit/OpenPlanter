@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import Mock, patch
 
 from agent.tool_defs import (
     TOOL_DEFINITIONS,
@@ -107,6 +108,44 @@ class GetToolDefinitionsTests(unittest.TestCase):
         preserved_again = get_tool_definitions(include_subtask=True, include_acceptance_criteria=True)
         subtask_again = next(d for d in preserved_again if d["name"] == "subtask")
         self.assertIn("acceptance_criteria", subtask_again["parameters"]["properties"])
+
+    def test_get_tool_definitions_prefers_plugin_registry_when_complete(self) -> None:
+        from agent.tool_registry import ToolRegistry
+
+        plugin_registry = ToolRegistry.from_definitions(TOOL_DEFINITIONS)
+        legacy_registry = ToolRegistry.from_definitions(TOOL_DEFINITIONS)
+
+        with patch("agent.tool_defs._plugin_tool_registry", return_value=plugin_registry) as plugin_mock:
+            with patch("agent.tool_defs._legacy_tool_registry", return_value=legacy_registry) as legacy_mock:
+                defs = get_tool_definitions(include_subtask=True, include_acceptance_criteria=True)
+        self.assertTrue(defs)
+        plugin_mock.assert_called()
+        legacy_mock.assert_not_called()
+
+    def test_get_tool_definitions_falls_back_when_plugin_registry_incomplete(self) -> None:
+        from agent.tool_registry import ToolRegistry
+
+        plugin_defs = [d for d in TOOL_DEFINITIONS if d["name"] != "read_artifact"]
+        plugin_registry = ToolRegistry.from_definitions(plugin_defs)
+        legacy_registry = ToolRegistry.from_definitions(TOOL_DEFINITIONS)
+        legacy_spy = Mock(wraps=legacy_registry)
+
+        with patch("agent.tool_defs._plugin_tool_registry", return_value=plugin_registry):
+            with patch("agent.tool_defs._legacy_tool_registry", return_value=legacy_spy):
+                defs = get_tool_definitions(include_subtask=True, include_artifacts=True, include_acceptance_criteria=True)
+        names = [d["name"] for d in defs]
+        self.assertIn("read_artifact", names)
+        self.assertTrue(legacy_spy.filtered_definitions.called)
+
+    def test_get_tool_definitions_falls_back_when_plugin_registry_errors(self) -> None:
+        from agent.tool_registry import ToolRegistry
+
+        legacy_registry = ToolRegistry.from_definitions(TOOL_DEFINITIONS)
+        with patch("agent.tool_defs._plugin_tool_registry", side_effect=RuntimeError("boom")):
+            with patch("agent.tool_defs._legacy_tool_registry", return_value=legacy_registry) as legacy_mock:
+                defs = get_tool_definitions(include_subtask=False, include_acceptance_criteria=True)
+        self.assertTrue(defs)
+        legacy_mock.assert_called()
 
 
 class MakeStrictParametersTests(unittest.TestCase):
@@ -255,6 +294,29 @@ class ToOpenAIToolsTests(unittest.TestCase):
         self.assertEqual(len(tools), 1)
         self.assertEqual(tools[0]["function"]["name"], "my_tool")
 
+    def test_default_tools_use_active_registry_list(self) -> None:
+        custom_defs = [
+            {
+                "name": "only_tool",
+                "description": "Only",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                    "additionalProperties": False,
+                },
+            }
+        ]
+
+        class _DummyRegistry:
+            def list_definitions(self):
+                return custom_defs
+
+        with patch("agent.tool_defs._active_tool_registry", return_value=_DummyRegistry()):
+            tools = to_openai_tools()
+        self.assertEqual(len(tools), 1)
+        self.assertEqual(tools[0]["function"]["name"], "only_tool")
+
     def test_empty_defs(self) -> None:
         tools = to_openai_tools(defs=[])
         self.assertEqual(tools, [])
@@ -295,6 +357,29 @@ class ToAnthropicToolsTests(unittest.TestCase):
     def test_empty_defs(self) -> None:
         tools = to_anthropic_tools(defs=[])
         self.assertEqual(tools, [])
+
+    def test_default_tools_use_active_registry_list(self) -> None:
+        custom_defs = [
+            {
+                "name": "only_tool",
+                "description": "Only",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                    "additionalProperties": False,
+                },
+            }
+        ]
+
+        class _DummyRegistry:
+            def list_definitions(self):
+                return custom_defs
+
+        with patch("agent.tool_defs._active_tool_registry", return_value=_DummyRegistry()):
+            tools = to_anthropic_tools()
+        self.assertEqual(len(tools), 1)
+        self.assertEqual(tools[0]["name"], "only_tool")
 
 
 if __name__ == "__main__":

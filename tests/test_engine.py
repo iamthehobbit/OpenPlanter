@@ -252,6 +252,63 @@ class EngineTests(unittest.TestCase):
             self.assertIn("read_image", calls)
             mocked_read_image.assert_called_once_with("chart.png")
 
+    def test_registry_dispatch_used_for_subtask_tool(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            cfg = AgentConfig(workspace=root, max_depth=2, max_steps_per_call=4, recursive=True, acceptance_criteria=False)
+            tools = WorkspaceTools(root=root)
+            calls: list[str] = []
+
+            class SpyRegistry(ToolRegistry):
+                def try_invoke(self, name, args, ctx=None):
+                    calls.append(name)
+                    return super().try_invoke(name, args, ctx)
+
+            model = ScriptedModel(
+                scripted_turns=[
+                    ModelTurn(tool_calls=[_tc("subtask", objective="do sub work")]),
+                    ModelTurn(text="sub done", stop_reason="end_turn"),
+                    ModelTurn(text="root done", stop_reason="end_turn"),
+                ]
+            )
+            injected = SpyRegistry.from_definitions(TOOL_DEFINITIONS)
+            engine = RLMEngine(model=model, tools=tools, config=cfg, tool_registry=injected)
+            result = engine.solve("top level objective")
+            self.assertEqual(result, "root done")
+            self.assertIn("subtask", calls)
+
+    def test_registry_dispatch_used_for_read_artifact_tool(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            cfg = AgentConfig(workspace=root, max_depth=1, max_steps_per_call=3, recursive=True)
+            tools = WorkspaceTools(root=root)
+            calls: list[str] = []
+
+            artifacts_dir = root / ".openplanter_artifacts"
+            artifacts_dir.mkdir(parents=True)
+            (artifacts_dir / "demo.jsonl").write_text(
+                '{"artifact_id":"demo","objective":"demo objective"}\n{"step":1}\n',
+                encoding="utf-8",
+            )
+
+            class SpyRegistry(ToolRegistry):
+                def try_invoke(self, name, args, ctx=None):
+                    calls.append(name)
+                    return super().try_invoke(name, args, ctx)
+
+            model = ScriptedModel(
+                scripted_turns=[
+                    ModelTurn(tool_calls=[_tc("read_artifact", artifact_id="demo", offset=0, limit=1)]),
+                    ModelTurn(text="done", stop_reason="end_turn"),
+                ]
+            )
+            injected = SpyRegistry.from_definitions(TOOL_DEFINITIONS)
+            engine = RLMEngine(model=model, tools=tools, config=cfg, tool_registry=injected)
+            result, ctx = engine.solve_with_context("read artifact")
+            self.assertEqual(result, "done")
+            self.assertIn("read_artifact", calls)
+            self.assertTrue(any("Artifact demo" in obs for obs in ctx.observations))
+
 
 class CustomSystemPromptTests(unittest.TestCase):
     def test_custom_system_prompt_override(self) -> None:
