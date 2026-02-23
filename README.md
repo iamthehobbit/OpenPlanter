@@ -171,11 +171,14 @@ tests/           Unit and integration tests
 # Install in editable mode
 pip install -e .
 
-# Run tests
+# Run tests (uv + dev test deps)
+uv run --extra dev pytest -q
+
+# Run tests (pip environment alternative)
 python -m pytest tests/
 
 # Skip live API tests
-python -m pytest tests/ --ignore=tests/test_live_models.py --ignore=tests/test_integration_live.py
+uv run --extra dev pytest tests/ --ignore=tests/test_live_models.py --ignore=tests/test_integration_live.py
 ```
 
 Requires Python 3.10+. Dependencies: `rich`, `prompt_toolkit`, `pyfiglet`.

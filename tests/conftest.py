@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+import sys
 from typing import Any
+
+# Ensure tests can import repo-local modules such as top-level scripts/.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 from agent.model import ToolCall
 
