@@ -14,7 +14,7 @@ from agent.engine import RLMEngine
 from agent.prompts import build_system_prompt as _build_system_prompt
 from agent.model import Conversation, ModelError, ModelTurn, ScriptedModel, ToolResult
 from agent.tool_defs import TOOL_DEFINITIONS
-from agent.tool_registry import ToolRegistry
+from agent.tool_registry import ToolDefinition, ToolPlugin, ToolRegistry
 from agent.tools import WorkspaceTools
 
 
@@ -309,6 +309,42 @@ class EngineTests(unittest.TestCase):
             self.assertIn("read_artifact", calls)
             self.assertTrue(any("Artifact demo" in obs for obs in ctx.observations))
 
+    def test_engine_loads_external_tool_plugins_from_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            cfg = AgentConfig(workspace=root, max_depth=1, max_steps_per_call=4)
+            cfg.tool_modules = ("ext.demo",)
+            tools = WorkspaceTools(root=root)
+
+            ext_plugin = ToolPlugin(
+                definition=ToolDefinition(
+                    name="ext.echo",
+                    description="Echo external",
+                    parameters={
+                        "type": "object",
+                        "properties": {"text": {"type": "string"}},
+                        "required": ["text"],
+                        "additionalProperties": False,
+                    },
+                ),
+                handler=lambda args, _ctx: str(args.get("text", "")),
+            )
+            injected = ToolRegistry.from_definitions(TOOL_DEFINITIONS)
+            model = ScriptedModel(
+                scripted_turns=[
+                    ModelTurn(tool_calls=[_tc("ext.echo", text="hello")]),
+                    ModelTurn(text="done", stop_reason="end_turn"),
+                ]
+            )
+
+            with patch("agent.plugin_loader.load_external_tool_plugins", return_value=[ext_plugin]) as mocked_loader:
+                engine = RLMEngine(model=model, tools=tools, config=cfg, tool_registry=injected)
+                result, ctx = engine.solve_with_context("use external plugin")
+
+            self.assertEqual(result, "done")
+            mocked_loader.assert_called_once_with(("ext.demo",))
+            self.assertTrue(any("hello" in obs for obs in ctx.observations))
+
 
 class CustomSystemPromptTests(unittest.TestCase):
     def test_custom_system_prompt_override(self) -> None:
@@ -521,6 +557,139 @@ class ParallelExecutionTests(unittest.TestCase):
             engine = RLMEngine(model=model, tools=tools, config=cfg)
             result = engine.solve("sequential fallback test")
             self.assertEqual(result, "parent done")
+
+    def test_confirmation_policy_blocks_registry_tool_without_callback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            cfg = AgentConfig(workspace=root, max_depth=1, max_steps_per_call=4, acceptance_criteria=False)
+            tools = WorkspaceTools(root=root)
+            model = ScriptedModel(
+                scripted_turns=[
+                    ModelTurn(tool_calls=[_tc("custom.confirmed")]),
+                    ModelTurn(text="done", stop_reason="end_turn"),
+                ]
+            )
+            reg = ToolRegistry()
+            calls: list[str] = []
+            reg.register_plugin(
+                ToolPlugin(
+                    definition=ToolDefinition(
+                        name="custom.confirmed",
+                        description="custom confirmed tool",
+                        parameters={"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+                    ),
+                    handler=lambda _a, _c: (calls.append("called") or "registry-list"),
+                    policy={"requires_confirmation": True},
+                )
+            )
+            engine = RLMEngine(model=model, tools=tools, config=cfg, tool_registry=reg)
+            result, ctx = engine.solve_with_context("confirmation policy block")
+            self.assertEqual(result, "done")
+            self.assertEqual(calls, [])
+            self.assertTrue(any("Blocked by confirmation policy" in obs for obs in ctx.observations))
+
+    def test_confirmation_policy_allows_registry_tool_with_callback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            cfg = AgentConfig(workspace=root, max_depth=1, max_steps_per_call=4, acceptance_criteria=False)
+            tools = WorkspaceTools(root=root)
+            model = ScriptedModel(
+                scripted_turns=[
+                    ModelTurn(tool_calls=[_tc("custom.confirmed")]),
+                    ModelTurn(text="done", stop_reason="end_turn"),
+                ]
+            )
+            reg = ToolRegistry()
+            calls: list[tuple[str, dict[str, object], dict[str, object]]] = []
+            reg.register_plugin(
+                ToolPlugin(
+                    definition=ToolDefinition(
+                        name="custom.confirmed",
+                        description="custom confirmed tool",
+                        parameters={"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+                    ),
+                    handler=lambda _a, _c: "registry-list",
+                    policy={"requires_confirmation": True, "tags": ["mutating"]},
+                )
+            )
+
+            def approve(name: str, args: dict[str, object], policy: dict[str, object]) -> bool:
+                calls.append((name, args, policy))
+                return True
+
+            engine = RLMEngine(
+                model=model,
+                tools=tools,
+                config=cfg,
+                tool_registry=reg,
+                tool_confirmation_callback=approve,
+            )
+            result, ctx = engine.solve_with_context("confirmation policy allow")
+            self.assertEqual(result, "done")
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0][0], "custom.confirmed")
+            self.assertEqual(calls[0][2]["requires_confirmation"], True)
+            self.assertTrue(any("registry-list" in obs for obs in ctx.observations))
+
+
+    def test_tool_allowlist_blocks_non_matching_tool(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            cfg = AgentConfig(
+                workspace=root,
+                max_depth=1,
+                max_steps_per_call=4,
+                acceptance_criteria=False,
+                allowed_tool_patterns=("altdata.*", "think"),
+            )
+            tools = WorkspaceTools(root=root)
+            model = ScriptedModel(
+                scripted_turns=[
+                    ModelTurn(tool_calls=[_tc("write_file", path="x.txt", content="nope")]),
+                    ModelTurn(text="done", stop_reason="end_turn"),
+                ]
+            )
+            engine = RLMEngine(model=model, tools=tools, config=cfg)
+            result, ctx = engine.solve_with_context("allowlist block")
+            self.assertEqual(result, "done")
+            self.assertTrue(any("Blocked by tool allowlist policy" in obs for obs in ctx.observations))
+            self.assertFalse((root / "x.txt").exists())
+
+    def test_tool_allowlist_allows_matching_altdata_tool(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            cfg = AgentConfig(
+                workspace=root,
+                max_depth=1,
+                max_steps_per_call=4,
+                acceptance_criteria=False,
+                allowed_tool_patterns=("altdata.*", "think"),
+            )
+            tools = WorkspaceTools(root=root)
+            model = ScriptedModel(
+                scripted_turns=[
+                    ModelTurn(tool_calls=[_tc("custom.altdata")]),
+                    ModelTurn(text="done", stop_reason="end_turn"),
+                ]
+            )
+            reg = ToolRegistry()
+            reg.register_plugin(
+                ToolPlugin(
+                    definition=ToolDefinition(
+                        name="custom.altdata",
+                        description="demo",
+                        parameters={"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+                    ),
+                    handler=lambda _a, _c: "ok",
+                )
+            )
+            # Use wildcard that matches custom.altdata only if configured accordingly.
+            cfg.allowed_tool_patterns = ("custom.*",)
+            engine = RLMEngine(model=model, tools=tools, config=cfg, tool_registry=reg)
+            result, ctx = engine.solve_with_context("allowlist allow")
+            self.assertEqual(result, "done")
+            self.assertTrue(any("ok" in obs for obs in ctx.observations))
+
 
 
 if __name__ == "__main__":

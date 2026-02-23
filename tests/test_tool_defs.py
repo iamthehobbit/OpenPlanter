@@ -8,6 +8,7 @@ from agent.tool_defs import (
     TOOL_DEFINITIONS,
     _make_strict_parameters,
     get_tool_definitions,
+    openai_tool_name_aliases,
     to_anthropic_tools,
     to_openai_tools,
 )
@@ -146,6 +147,33 @@ class GetToolDefinitionsTests(unittest.TestCase):
                 defs = get_tool_definitions(include_subtask=False, include_acceptance_criteria=True)
         self.assertTrue(defs)
         legacy_mock.assert_called()
+
+    def test_get_tool_definitions_keeps_plugin_primary_with_external_tools_appended(self) -> None:
+        from agent.tool_registry import ToolRegistry
+
+        plugin_registry = ToolRegistry.from_definitions(TOOL_DEFINITIONS)
+        plugin_registry.register_definition(
+            {
+                "name": "ext.echo",
+                "description": "External echo",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                    "additionalProperties": False,
+                },
+            }
+        )
+        legacy_registry = ToolRegistry.from_definitions(TOOL_DEFINITIONS)
+        legacy_spy = Mock(wraps=legacy_registry)
+
+        with patch("agent.tool_defs._plugin_tool_registry", return_value=plugin_registry):
+            with patch("agent.tool_defs._legacy_tool_registry", return_value=legacy_spy):
+                defs = get_tool_definitions(include_subtask=True, include_acceptance_criteria=True)
+        names = [d["name"] for d in defs]
+        self.assertIn("ext.echo", names)
+        self.assertNotIn("execute", names)
+        self.assertFalse(legacy_spy.filtered_definitions.called)
 
 
 class MakeStrictParametersTests(unittest.TestCase):
@@ -320,6 +348,42 @@ class ToOpenAIToolsTests(unittest.TestCase):
     def test_empty_defs(self) -> None:
         tools = to_openai_tools(defs=[])
         self.assertEqual(tools, [])
+
+    def test_openai_aliases_dotted_tool_names(self) -> None:
+        custom = [
+            {
+                "name": "altdata.query",
+                "description": "Query",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                    "additionalProperties": False,
+                },
+            }
+        ]
+        aliases = openai_tool_name_aliases(custom)
+        self.assertEqual(aliases["altdata.query"], "altdata_query")
+        tools = to_openai_tools(defs=custom)
+        self.assertEqual(tools[0]["function"]["name"], "altdata_query")
+
+    def test_openai_alias_collision_raises(self) -> None:
+        custom = [
+            {
+                "name": "a.b",
+                "description": "One",
+                "parameters": {"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+            },
+            {
+                "name": "a_b",
+                "description": "Two",
+                "parameters": {"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+            },
+        ]
+        with self.assertRaises(ValueError):
+            openai_tool_name_aliases(custom)
+        with self.assertRaises(ValueError):
+            to_openai_tools(defs=custom)
 
 
 class ToAnthropicToolsTests(unittest.TestCase):

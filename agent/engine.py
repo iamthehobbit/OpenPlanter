@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import fnmatch
 import re
 import time
 import threading
@@ -22,6 +23,7 @@ from .tools import WorkspaceTools
 EventCallback = Callable[[str], None]
 StepCallback = Callable[[dict[str, Any]], None]
 ContentDeltaCallback = Callable[[str, str], None]
+ToolConfirmationCallback = Callable[[str, dict[str, Any], dict[str, Any]], bool]
 
 
 def _summarize_args(args: dict[str, Any], max_len: int = 120) -> str:
@@ -138,6 +140,7 @@ class RLMEngine:
     _pending_image: threading.local = field(default_factory=threading.local)
     _tool_call_ctx: threading.local = field(default_factory=threading.local)
     tool_registry: ToolRegistry | None = None
+    tool_confirmation_callback: ToolConfirmationCallback | None = None
 
     def __post_init__(self) -> None:
         if not self.system_prompt:
@@ -163,11 +166,16 @@ class RLMEngine:
         if self.tool_registry is None:
             return
         from .builtin_tool_plugins import get_builtin_tool_plugins
+        from .plugin_loader import load_external_tool_plugins
 
         self.tool_registry.register_plugins(
             get_builtin_tool_plugins(),
             allow_handler_override=True,
         )
+        if self.config.tool_modules:
+            self.tool_registry.register_plugins(
+                load_external_tool_plugins(self.config.tool_modules),
+            )
 
     def cancel(self) -> None:
         """Signal the engine to stop after the current model call or tool."""
@@ -210,6 +218,24 @@ class RLMEngine:
                 cleanup()
         return result, active_context
 
+    def _confirmation_policy_check(self, *, name: str, args: dict[str, Any]) -> str | None:
+        """Return a policy error if the tool requires explicit confirmation."""
+        if self.tool_registry is None:
+            return None
+        policy = self.tool_registry.get_policy(name)
+        if not bool(policy.get("requires_confirmation", False)):
+            return None
+        callback = self.tool_confirmation_callback
+        if callback is None:
+            return f"Blocked by confirmation policy: {name} requires explicit approval"
+        try:
+            approved = bool(callback(name, args, policy))
+        except Exception as exc:
+            return f"Blocked by confirmation policy: approval callback error for {name}: {exc}"
+        if not approved:
+            return f"Blocked by confirmation policy: approval denied for {name}"
+        return None
+
     def _emit(self, msg: str, on_event: EventCallback | None) -> None:
         if on_event:
             try:
@@ -221,6 +247,18 @@ class RLMEngine:
         return text if len(text) <= self.config.max_observation_chars else (
             f"{text[:self.config.max_observation_chars]}"
             f"\n...[truncated {len(text) - self.config.max_observation_chars} chars]..."
+        )
+
+    def _tool_allowlist_policy_check(self, name: str) -> str | None:
+        """Return a policy error if the tool is outside the configured allowlist."""
+        patterns = tuple(self.config.allowed_tool_patterns)
+        if not patterns:
+            return None
+        if any(fnmatch.fnmatchcase(name, pat) for pat in patterns):
+            return None
+        return (
+            f"Blocked by tool allowlist policy: {name} is not allowed. "
+            f"Allowed patterns: {', '.join(patterns)}"
         )
 
     def _runtime_policy_check(self, name: str, args: dict[str, Any], depth: int) -> str | None:
@@ -865,9 +903,15 @@ class RLMEngine:
     ) -> tuple[bool, str]:
         name = tool_call.name
         args = tool_call.arguments
+        allowlist_error = self._tool_allowlist_policy_check(name=name)
+        if allowlist_error:
+            return False, allowlist_error
         policy_error = self._runtime_policy_check(name=name, args=args, depth=depth)
         if policy_error:
             return False, policy_error
+        confirmation_error = self._confirmation_policy_check(name=name, args=args)
+        if confirmation_error:
+            return False, confirmation_error
 
         if self.tool_registry is not None:
             prior_call_ctx = getattr(self._tool_call_ctx, "data", None)

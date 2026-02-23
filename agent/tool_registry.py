@@ -47,6 +47,7 @@ class ToolPlugin:
 
     definition: ToolDefinition
     handler: ToolHandler
+    policy: dict[str, Any] = field(default_factory=dict)
 
 
 def tool(
@@ -55,6 +56,7 @@ def tool(
     description: str,
     parameters_schema: dict[str, Any],
     collector: list[ToolPlugin] | None = None,
+    policy: dict[str, Any] | None = None,
 ):
     """Decorator to build and optionally collect a tool plugin."""
 
@@ -66,6 +68,7 @@ def tool(
                 parameters=copy.deepcopy(parameters_schema),
             ),
             handler=fn,
+            policy=copy.deepcopy(policy or {}),
         )
         setattr(fn, "__openplanter_tool_plugin__", plugin)
         if collector is not None:
@@ -87,6 +90,7 @@ class ToolRegistry:
     _tools: dict[str, ToolDefinition] = field(default_factory=dict)
     _order: list[str] = field(default_factory=list)
     _handlers: dict[str, ToolHandler] = field(default_factory=dict)
+    _policies: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def register_definition(self, payload: dict[str, Any]) -> None:
         """Register one provider-neutral tool definition dict."""
@@ -139,6 +143,7 @@ class ToolRegistry:
         if name not in self._tools:
             raise KeyError(f"Cannot register handler for unknown tool: {name}")
         self._handlers[name] = handler
+        self._policies.setdefault(name, {})
 
     def register_plugin(self, plugin: ToolPlugin, *, allow_handler_override: bool = False) -> None:
         """Register a plugin's definition and handler.
@@ -152,6 +157,7 @@ class ToolRegistry:
         if name not in self._tools:
             self.register_definition_obj(plugin.definition)
             self._handlers[name] = plugin.handler
+            self._policies[name] = copy.deepcopy(plugin.policy)
             return
 
         existing = self._tools[name]
@@ -159,11 +165,13 @@ class ToolRegistry:
         if (
             existing.description != new_def.description
             or existing.parameters != new_def.parameters
+            or self._policies.get(name, {}) != plugin.policy
         ):
             raise ValueError(f"Conflicting duplicate tool plugin definition: {name}")
         if not allow_handler_override:
             raise ValueError(f"Duplicate tool plugin registration: {name}")
         self._handlers[name] = plugin.handler
+        self._policies[name] = copy.deepcopy(plugin.policy)
 
     def register_plugins(
         self,
@@ -190,6 +198,11 @@ class ToolRegistry:
         if handler is None:
             return False, ""
         return True, handler(args, ctx)
+
+    def get_policy(self, name: str) -> dict[str, Any]:
+        """Return a deep-copied policy metadata dict for a tool."""
+        return copy.deepcopy(self._policies.get(name, {}))
+
 
     @classmethod
     def from_definitions(cls, payloads: list[dict[str, Any]]) -> "ToolRegistry":

@@ -76,6 +76,25 @@ class ToolRegistryDefinitionTests(unittest.TestCase):
         self.assertTrue(handled)
         self.assertEqual(out, "ok")
 
+    def test_register_plugin_stores_policy_metadata_deepcopy(self) -> None:
+        reg = ToolRegistry()
+        plugin = ToolPlugin(
+            definition=ToolDefinition(
+                name="mutating.tool",
+                description="plugin tool",
+                parameters={"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+            ),
+            handler=lambda _args, _ctx: "ok",
+            policy={"requires_confirmation": True, "tags": ["mutating"]},
+        )
+        reg.register_plugin(plugin)
+
+        policy = reg.get_policy("mutating.tool")
+        self.assertEqual(policy["requires_confirmation"], True)
+        self.assertEqual(policy["tags"], ["mutating"])
+        policy["tags"].append("changed")
+        self.assertEqual(reg.get_policy("mutating.tool")["tags"], ["mutating"])
+
     def test_register_plugin_duplicate_name_raises_by_default(self) -> None:
         reg = ToolRegistry()
         base_def = ToolDefinition(
@@ -132,6 +151,22 @@ class ToolRegistryDefinitionTests(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             reg.register_plugin(conflicting, allow_handler_override=True)
+
+    def test_register_plugin_duplicate_name_conflicting_policy_raises(self) -> None:
+        reg = ToolRegistry()
+        base_def = ToolDefinition(
+            name="plug",
+            description="plugin tool",
+            parameters={"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+        )
+        reg.register_plugin(
+            ToolPlugin(definition=base_def, handler=lambda _a, _c: "v1", policy={"requires_confirmation": True})
+        )
+        with self.assertRaises(ValueError):
+            reg.register_plugin(
+                ToolPlugin(definition=base_def, handler=lambda _a, _c: "v2", policy={}),
+                allow_handler_override=True,
+            )
 
     def test_list_definitions_returns_deep_copies(self) -> None:
         reg = ToolRegistry.from_definitions([
@@ -193,6 +228,23 @@ class ToolDecoratorTests(unittest.TestCase):
         # mutate plugin copy too; original should remain modified independently
         collector[0].definition.parameters["properties"]["x"]["type"] = "number"
         self.assertEqual(schema["properties"]["x"]["type"], "integer")
+
+    def test_tool_decorator_deepcopies_policy(self) -> None:
+        collector = []
+        policy = {"requires_confirmation": True, "tags": ["mutating"]}
+
+        @tool(
+            name="demo.policy",
+            description="demo",
+            parameters_schema={"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+            collector=collector,
+            policy=policy,
+        )
+        def fn(args, ctx):
+            return "ok"
+
+        policy["tags"].append("changed")
+        self.assertEqual(collector[0].policy["tags"], ["mutating"])
 
     def test_external_module_plugin_can_use_real_rng_library(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -6,6 +6,7 @@ provider-specific shapes expected by OpenAI and Anthropic APIs.
 from __future__ import annotations
 
 from functools import lru_cache
+import re
 from typing import Any
 
 TOOL_DEFINITIONS: list[dict[str, Any]] = [
@@ -435,28 +436,34 @@ def _legacy_tool_registry():
     return ToolRegistry.from_definitions(TOOL_DEFINITIONS)
 
 
-@lru_cache(maxsize=1)
-def _plugin_tool_registry():
+@lru_cache(maxsize=32)
+def _plugin_tool_registry(external_modules: tuple[str, ...] = ()):
     """Build a registry from decorator-collected built-in plugins.
 
     Transitional plugin-primary path. If the plugin set is incomplete or
     import/registration fails, callers should fall back to `_legacy_tool_registry`.
     """
     from .builtin_tool_plugins import get_builtin_tool_plugins
+    from .plugin_loader import load_external_tool_plugins
     from .tool_registry import ToolRegistry
 
     registry = ToolRegistry()
     registry.register_plugins(get_builtin_tool_plugins())
+    if external_modules:
+        registry.register_plugins(load_external_tool_plugins(external_modules))
     return registry
 
 
 def _active_tool_registry():
     """Return the best available registry, preferring plugin-backed definitions."""
     try:
-        plugin_registry = _plugin_tool_registry()
+        from .plugin_loader import configured_tool_modules_from_env
+
+        external_modules = configured_tool_modules_from_env()
+        plugin_registry = _plugin_tool_registry(external_modules)
         plugin_names = [d["name"] for d in plugin_registry.list_definitions()]
         legacy_names = [d["name"] for d in TOOL_DEFINITIONS]
-        if plugin_names == legacy_names:
+        if plugin_names[: len(legacy_names)] == legacy_names:
             return plugin_registry
     except Exception:
         pass
@@ -557,12 +564,45 @@ def _strict_fixup(schema: dict[str, Any]) -> None:
             _strict_fixup(items)
 
 
+_OPENAI_TOOL_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
+
+
+def openai_tool_name_alias(name: str) -> str:
+    """Return an OpenAI-compatible function name alias for a canonical tool name."""
+    if _OPENAI_TOOL_NAME_PATTERN.fullmatch(name):
+        return name
+    alias = re.sub(r"[^a-zA-Z0-9_-]", "_", name)
+    alias = re.sub(r"_+", "_", alias).strip("_")
+    if not alias:
+        raise ValueError(f"Tool name cannot be aliased for OpenAI: {name!r}")
+    return alias
+
+
+def openai_tool_name_aliases(defs: list[dict[str, Any]] | None = None) -> dict[str, str]:
+    """Map canonical tool names to OpenAI-safe aliases, validating collisions."""
+    defs = defs if defs is not None else _active_tool_registry().list_definitions()
+    aliases: dict[str, str] = {}
+    seen: dict[str, str] = {}
+    for d in defs:
+        canonical = str(d["name"])
+        alias = openai_tool_name_alias(canonical)
+        prior = seen.get(alias)
+        if prior is not None and prior != canonical:
+            raise ValueError(
+                f"OpenAI tool-name alias collision: {prior!r} and {canonical!r} both map to {alias!r}"
+            )
+        seen[alias] = canonical
+        aliases[canonical] = alias
+    return aliases
+
+
 def to_openai_tools(
     defs: list[dict[str, Any]] | None = None,
     strict: bool = True,
 ) -> list[dict[str, Any]]:
     """Convert provider-neutral definitions to OpenAI tools array format."""
     defs = defs if defs is not None else _active_tool_registry().list_definitions()
+    aliases = openai_tool_name_aliases(defs)
     tools: list[dict[str, Any]] = []
     for d in defs:
         parameters = d["parameters"]
@@ -571,7 +611,7 @@ def to_openai_tools(
         tool: dict[str, Any] = {
             "type": "function",
             "function": {
-                "name": d["name"],
+                "name": aliases[str(d["name"])],
                 "description": d["description"],
                 "parameters": parameters,
             },
