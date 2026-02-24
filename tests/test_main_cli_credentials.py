@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from agent.__main__ import _load_credentials, build_parser
+from agent.__main__ import _load_credentials, _plain_tool_confirmation_prompt, build_parser
 from agent.config import AgentConfig
 from agent.credentials import CredentialBundle
 
@@ -55,6 +55,24 @@ class MainCliCredentialTests(unittest.TestCase):
                 MockStore.return_value.load.return_value = CredentialBundle()
                 creds2 = _load_credentials(cfg, args2, allow_prompt=False)
             self.assertEqual(creds2.openai_api_key, "from-cli")
+
+    def test_plain_tool_confirmation_prompt_accepts_yes(self) -> None:
+        with patch("builtins.input", return_value="y"):
+            approved = _plain_tool_confirmation_prompt(
+                "altdata.jobs_tick",
+                {"job_id": 7},
+                {"confirmation_reason": "Mutates scheduler state", "tags": ["mutating"]},
+            )
+        self.assertTrue(approved)
+
+    def test_plain_tool_confirmation_prompt_rejects_default_no(self) -> None:
+        with patch("builtins.input", return_value=""):
+            approved = _plain_tool_confirmation_prompt(
+                "altdata.jobs_tick",
+                {"job_id": 7},
+                {"confirmation_reason": "Mutates scheduler state"},
+            )
+        self.assertFalse(approved)
 
 
 if __name__ == "__main__":

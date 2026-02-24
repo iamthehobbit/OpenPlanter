@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from agent.engine import RLMEngine
-from agent.tui import _ActivityDisplay
+from agent.tui import _ActivityDisplay, _ConfirmationRequest, RichREPL
 
 
 # ---------------------------------------------------------------------------
@@ -233,3 +233,30 @@ class TestInputQueuing:
         second = queue.pop(0)
         assert second == "third question"
         assert queue == []
+
+
+class TestConfirmationUX:
+    def test_repl_confirmation_callback_queues_request_and_waits_for_decision(self):
+        repl = RichREPL.__new__(RichREPL)
+        repl._confirm_requests = __import__("queue").Queue()
+
+        result_holder: dict[str, bool] = {}
+
+        def _call():
+            result_holder["approved"] = repl._tool_confirmation_callback(
+                "altdata.jobs_tick",
+                {"job_id": 7},
+                {"requires_confirmation": True, "confirmation_reason": "Mutates scheduler state"},
+            )
+
+        t = threading.Thread(target=_call, daemon=True)
+        t.start()
+
+        req = repl._confirm_requests.get(timeout=1.0)
+        assert isinstance(req, _ConfirmationRequest)
+        assert req.name == "altdata.jobs_tick"
+        req.approved = True
+        req.decision_event.set()
+
+        t.join(timeout=1.0)
+        assert result_holder["approved"] is True

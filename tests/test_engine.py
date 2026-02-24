@@ -631,6 +631,47 @@ class ParallelExecutionTests(unittest.TestCase):
             self.assertEqual(calls[0][2]["requires_confirmation"], True)
             self.assertTrue(any("registry-list" in obs for obs in ctx.observations))
 
+    def test_confirmation_policy_repeated_blocked_retry_suppression_uses_policy_hints(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            cfg = AgentConfig(workspace=root, max_depth=1, max_steps_per_call=6, acceptance_criteria=False)
+            tools = WorkspaceTools(root=root)
+            model = ScriptedModel(
+                scripted_turns=[
+                    ModelTurn(tool_calls=[_tc("custom.confirmed", x=1)]),
+                    ModelTurn(tool_calls=[_tc("custom.confirmed", x=1)]),
+                    ModelTurn(text="done", stop_reason="end_turn"),
+                ]
+            )
+            reg = ToolRegistry()
+            reg.register_plugin(
+                ToolPlugin(
+                    definition=ToolDefinition(
+                        name="custom.confirmed",
+                        description="custom confirmed tool",
+                        parameters={
+                            "type": "object",
+                            "properties": {"x": {"type": "integer"}},
+                            "required": [],
+                            "additionalProperties": False,
+                        },
+                    ),
+                    handler=lambda _a, _c: "never-called",
+                    policy={
+                        "requires_confirmation": True,
+                        "blocked_retry_hint": "Ask for confirmation instead of retrying the same call.",
+                        "policy_guidance": "Summarize impact and request approval once.",
+                    },
+                )
+            )
+            engine = RLMEngine(model=model, tools=tools, config=cfg, tool_registry=reg)
+            result, ctx = engine.solve_with_context("repeated blocked confirmation retry")
+            self.assertEqual(result, "done")
+            blocked = [obs for obs in ctx.observations if "Blocked by confirmation policy" in obs]
+            self.assertGreaterEqual(len(blocked), 2)
+            self.assertTrue(any("Repeated blocked tool call detected" in obs for obs in blocked))
+            self.assertTrue(any("Ask for confirmation instead of retrying the same call." in obs for obs in blocked))
+
 
     def test_tool_allowlist_blocks_non_matching_tool(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

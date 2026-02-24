@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import threading
 import time
+from queue import Empty, Queue
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -132,6 +133,15 @@ class ChatContext:
     runtime: SessionRuntime
     cfg: AgentConfig
     settings_store: SettingsStore
+
+
+@dataclass
+class _ConfirmationRequest:
+    name: str
+    args: dict[str, Any]
+    policy: dict[str, Any]
+    decision_event: threading.Event = field(default_factory=threading.Event)
+    approved: bool = False
 
 
 def _format_token_count(n: int) -> str:
@@ -673,6 +683,8 @@ class RichREPL:
             self._demo_hook = DemoRenderHook(censor)
 
         self._activity = _ActivityDisplay(self.console, censor_fn=censor_fn)
+        self._confirm_requests: Queue[_ConfirmationRequest] = Queue()
+        self.ctx.runtime.engine.tool_confirmation_callback = self._tool_confirmation_callback
 
         history_dir = Path.home() / ".openplanter"
         history_dir.mkdir(parents=True, exist_ok=True)
@@ -703,6 +715,59 @@ class RichREPL:
             key_bindings=kb,
             multiline=False,
         )
+
+    def _tool_confirmation_callback(self, name: str, args: dict[str, Any], policy: dict[str, Any]) -> bool:
+        req = _ConfirmationRequest(name=name, args=dict(args), policy=dict(policy))
+        self._confirm_requests.put(req)
+        req.decision_event.wait()
+        return bool(req.approved)
+
+    def _render_confirmation_prompt(self, req: _ConfirmationRequest) -> bool:
+        from rich.panel import Panel
+        from rich.text import Text
+
+        self._activity.stop()
+        reason = str(req.policy.get("confirmation_reason") or "Tool requires confirmation.")
+        tags = ", ".join([str(t) for t in list(req.policy.get("tags") or []) if str(t).strip()])
+        blocked_hint = str(req.policy.get("blocked_retry_hint") or "").strip()
+        guidance = str(req.policy.get("policy_guidance") or "").strip()
+        args_preview = _extract_key_arg(req.name, req.args) or _clip_event(str(req.args))
+        body_lines = [
+            f"[bold]Tool:[/bold] {req.name}",
+            f"[bold]Reason:[/bold] {reason}",
+        ]
+        if tags:
+            body_lines.append(f"[bold]Tags:[/bold] {tags}")
+        if args_preview:
+            body_lines.append(f"[bold]Args:[/bold] {args_preview}")
+        if blocked_hint:
+            body_lines.append(f"[dim]Hint:[/dim] {blocked_hint}")
+        if guidance:
+            body_lines.append(f"[dim]Policy guidance:[/dim] {guidance}")
+        self.console.print(Panel.fit(Text.from_markup("\n".join(body_lines)), title="Confirmation Required", border_style="yellow"))
+        while True:
+            raw = self.session.prompt("confirm> ").strip().lower()
+            if raw in {"y", "yes"}:
+                return True
+            if raw in {"n", "no", ""}:
+                return False
+            if raw in {"v", "view"}:
+                import json
+
+                self.console.print(Text(json.dumps(req.args, indent=2, default=str), style="dim"))
+                continue
+            self.console.print("[dim]Enter y, n, or v.[/dim]")
+
+    def _process_confirmation_requests(self) -> None:
+        while True:
+            try:
+                req = self._confirm_requests.get_nowait()
+            except Empty:
+                return
+            try:
+                req.approved = bool(self._render_confirmation_prompt(req))
+            finally:
+                req.decision_event.set()
 
     # ------------------------------------------------------------------
     # on_event — simplified, only handles calling model / subtask / error
@@ -954,12 +1019,14 @@ class RichREPL:
             # Wait for agent to complete; Ctrl+C cancels
             try:
                 while self._agent_thread.is_alive():
+                    self._process_confirmation_requests()
                     self._agent_thread.join(timeout=0.2)
             except KeyboardInterrupt:
                 self.ctx.runtime.engine.cancel()
                 self.console.print("[dim]Cancelling...[/dim]")
                 self._agent_thread.join()
 
+            self._process_confirmation_requests()
             self._agent_thread.join()
             self._agent_thread = None
 

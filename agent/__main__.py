@@ -26,6 +26,34 @@ from .tui import ChatContext, _clip_event, _get_model_display_name, dispatch_sla
 VALID_REASONING_FLAGS = ["low", "medium", "high", "none"]
 
 
+def _plain_tool_confirmation_prompt(name: str, args: dict[str, object], policy: dict[str, object]) -> bool:
+    reason = str(policy.get("confirmation_reason") or f"{name} requires explicit approval")
+    tags = [str(t) for t in list(policy.get("tags") or []) if str(t).strip()]
+    blocked_hint = str(policy.get("blocked_retry_hint") or "").strip()
+    guidance = str(policy.get("policy_guidance") or "").strip()
+    print(f"confirm> Tool: {name}")
+    print(f"confirm> Reason: {reason}")
+    if tags:
+        print(f"confirm> Tags: {', '.join(tags)}")
+    if args:
+        try:
+            arg_preview = ", ".join(f"{k}={v}" for k, v in list(args.items())[:5])
+        except Exception:
+            arg_preview = str(args)
+        print(f"confirm> Args: {arg_preview}")
+    if blocked_hint:
+        print(f"confirm> Hint: {blocked_hint}")
+    if guidance:
+        print(f"confirm> Policy guidance: {guidance}")
+    while True:
+        raw = input("Approve tool call? [y/N] ").strip().lower()
+        if raw in {"y", "yes"}:
+            return True
+        if raw in {"", "n", "no"}:
+            return False
+        print("Please answer y or n.")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="openplanter-agent",
@@ -358,6 +386,7 @@ def run_plain_repl(ctx: ChatContext) -> None:
         print(censor_fn(text) if censor_fn else text)
 
     _out("OpenPlanter Agent (plain mode). Type /quit to exit.")
+    ctx.runtime.engine.tool_confirmation_callback = _plain_tool_confirmation_prompt
     while True:
         try:
             objective = input("you> ").strip()

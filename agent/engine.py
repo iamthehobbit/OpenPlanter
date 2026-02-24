@@ -136,6 +136,7 @@ class RLMEngine:
     session_dir: Path | None = None
     session_id: str | None = None
     _shell_command_counts: dict[tuple[int, str], int] = field(default_factory=dict)
+    _blocked_tool_policy_counts: dict[tuple[int, str, str], int] = field(default_factory=dict)
     _cancel: threading.Event = field(default_factory=threading.Event)
     _pending_image: threading.local = field(default_factory=threading.local)
     _tool_call_ctx: threading.local = field(default_factory=threading.local)
@@ -199,6 +200,7 @@ class RLMEngine:
         self._cancel.clear()
         with self._lock:
             self._shell_command_counts.clear()
+            self._blocked_tool_policy_counts.clear()
         active_context = context if context is not None else ExternalContext()
         deadline = (time.monotonic() + self.config.max_solve_seconds) if self.config.max_solve_seconds > 0 else 0
         try:
@@ -276,6 +278,37 @@ class RLMEngine:
         return (
             "Blocked by runtime policy: identical run_shell command repeated more than twice "
             "at the same depth. Change strategy instead of retrying the same command."
+        )
+
+    def _blocked_tool_retry_message(self, *, name: str, args: dict[str, Any], depth: int, base_error: str) -> str:
+        """Augment repeated blocked-tool errors with explicit anti-retry guidance."""
+        if not str(base_error).startswith("Blocked by"):
+            return base_error
+        try:
+            args_key = json.dumps(args, sort_keys=True, default=str)
+        except Exception:
+            args_key = repr(args)
+        key = (depth, name, args_key)
+        with self._lock:
+            count = self._blocked_tool_policy_counts.get(key, 0) + 1
+            self._blocked_tool_policy_counts[key] = count
+        if count <= 1:
+            return base_error
+        hints: list[str] = []
+        if self.tool_registry is not None:
+            try:
+                policy = self.tool_registry.get_policy(name)
+            except Exception:
+                policy = {}
+            for k in ("blocked_retry_hint", "policy_guidance", "confirmation_reason"):
+                v = policy.get(k)
+                if isinstance(v, str) and v.strip():
+                    hints.append(v.strip())
+        hint_text = f" Hints: {' | '.join(hints)}" if hints else ""
+        return (
+            f"{base_error} Repeated blocked tool call detected for {name} at depth {depth}; "
+            "do not retry the same blocked call. Change strategy or request approval/policy changes."
+            f"{hint_text}"
         )
 
     def _get_tool_call_ctx(self) -> dict[str, Any] | None:
@@ -905,13 +938,13 @@ class RLMEngine:
         args = tool_call.arguments
         allowlist_error = self._tool_allowlist_policy_check(name=name)
         if allowlist_error:
-            return False, allowlist_error
+            return False, self._blocked_tool_retry_message(name=name, args=args, depth=depth, base_error=allowlist_error)
         policy_error = self._runtime_policy_check(name=name, args=args, depth=depth)
         if policy_error:
-            return False, policy_error
+            return False, self._blocked_tool_retry_message(name=name, args=args, depth=depth, base_error=policy_error)
         confirmation_error = self._confirmation_policy_check(name=name, args=args)
         if confirmation_error:
-            return False, confirmation_error
+            return False, self._blocked_tool_retry_message(name=name, args=args, depth=depth, base_error=confirmation_error)
 
         if self.tool_registry is not None:
             prior_call_ctx = getattr(self._tool_call_ctx, "data", None)
