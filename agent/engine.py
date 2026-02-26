@@ -150,13 +150,11 @@ class RLMEngine:
                 acceptance_criteria=self.config.acceptance_criteria,
                 demo=self.config.demo,
             )
-        ac = self.config.acceptance_criteria
-        tool_defs = get_tool_definitions(include_subtask=self.config.recursive, include_acceptance_criteria=ac)
-        if hasattr(self.model, "tool_defs"):
-            self.model.tool_defs = tool_defs
         if self.tool_registry is None:
             self.tool_registry = ToolRegistry.from_definitions(TOOL_DEFINITIONS)
         self._register_registry_handlers()
+        if hasattr(self.model, "tool_defs"):
+            self.model.tool_defs = self._model_tool_definitions(include_subtask=self.config.recursive)
 
     def _register_registry_handlers(self) -> None:
         """Register an incremental set of handlers on the registry.
@@ -244,6 +242,36 @@ class RLMEngine:
                 on_event(msg)
             except Exception:
                 pass
+
+    def _filter_tool_defs_by_allowlist(self, defs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        patterns = tuple(self.config.allowed_tool_patterns)
+        if not patterns:
+            return defs
+        out: list[dict[str, Any]] = []
+        for d in defs:
+            name = str(d.get("name", ""))
+            if any(fnmatch.fnmatchcase(name, pat) for pat in patterns):
+                out.append(d)
+        return out
+
+    def _model_tool_definitions(self, *, include_subtask: bool) -> list[dict[str, Any]]:
+        defs = get_tool_definitions(
+            include_subtask=include_subtask,
+            include_acceptance_criteria=self.config.acceptance_criteria,
+        )
+        filtered = self._filter_tool_defs_by_allowlist(defs)
+        patterns = tuple(self.config.allowed_tool_patterns)
+        if not patterns or self.tool_registry is None:
+            return filtered
+        # Include allowlisted registry-only tools (for custom/external plugin registries)
+        # that may not appear in the global tool-def export path.
+        seen = {str(d.get("name", "")) for d in filtered}
+        for d in self._filter_tool_defs_by_allowlist(self.tool_registry.list_definitions()):
+            name = str(d.get("name", ""))
+            if name and name not in seen:
+                filtered.append(d)
+                seen.add(name)
+        return filtered
 
     def _clip_observation(self, text: str) -> str:
         return text if len(text) <= self.config.max_observation_chars else (
@@ -433,16 +461,10 @@ class RLMEngine:
 
         _saved_defs = None
         if exec_model and hasattr(exec_model, "tool_defs"):
-            exec_model.tool_defs = get_tool_definitions(
-                include_subtask=False,
-                include_acceptance_criteria=self.config.acceptance_criteria,
-            )
+            exec_model.tool_defs = self._model_tool_definitions(include_subtask=False)
         elif exec_model is None and hasattr(cur, "tool_defs"):
             _saved_defs = cur.tool_defs
-            cur.tool_defs = get_tool_definitions(
-                include_subtask=False,
-                include_acceptance_criteria=self.config.acceptance_criteria,
-            )
+            cur.tool_defs = self._model_tool_definitions(include_subtask=False)
 
         self._emit(f"[d{depth}] >> executing leaf: {objective}", on_event)
         child_logger = replay_logger.child(depth, step) if replay_logger else None
@@ -1179,10 +1201,10 @@ class RLMEngine:
             # Give executor full tools (no subtask, no execute).
             _saved_defs = None
             if exec_model and hasattr(exec_model, "tool_defs"):
-                exec_model.tool_defs = get_tool_definitions(include_subtask=False, include_acceptance_criteria=self.config.acceptance_criteria)
+                exec_model.tool_defs = self._model_tool_definitions(include_subtask=False)
             elif exec_model is None and hasattr(cur, "tool_defs"):
                 _saved_defs = cur.tool_defs
-                cur.tool_defs = get_tool_definitions(include_subtask=False, include_acceptance_criteria=self.config.acceptance_criteria)
+                cur.tool_defs = self._model_tool_definitions(include_subtask=False)
 
             self._emit(f"[d{depth}] >> executing leaf: {objective}", on_event)
             child_logger = replay_logger.child(depth, step) if replay_logger else None

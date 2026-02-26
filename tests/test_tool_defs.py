@@ -7,6 +7,7 @@ from unittest.mock import Mock, patch
 from agent.tool_defs import (
     TOOL_DEFINITIONS,
     _make_strict_parameters,
+    anthropic_tool_name_aliases,
     get_tool_definitions,
     openai_tool_name_aliases,
     to_anthropic_tools,
@@ -421,6 +422,42 @@ class ToAnthropicToolsTests(unittest.TestCase):
     def test_empty_defs(self) -> None:
         tools = to_anthropic_tools(defs=[])
         self.assertEqual(tools, [])
+
+    def test_anthropic_aliases_dotted_tool_names(self) -> None:
+        custom = [
+            {
+                "name": "redbook.catalog_snapshots",
+                "description": "List snapshots",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                    "additionalProperties": False,
+                },
+            }
+        ]
+        aliases = anthropic_tool_name_aliases(custom)
+        self.assertEqual(aliases["redbook.catalog_snapshots"], "redbook_catalog_snapshots")
+        tools = to_anthropic_tools(defs=custom)
+        self.assertEqual(tools[0]["name"], "redbook_catalog_snapshots")
+
+    def test_anthropic_alias_collision_raises(self) -> None:
+        custom = [
+            {
+                "name": "a.b",
+                "description": "One",
+                "parameters": {"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+            },
+            {
+                "name": "a_b",
+                "description": "Two",
+                "parameters": {"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+            },
+        ]
+        with self.assertRaises(ValueError):
+            anthropic_tool_name_aliases(custom)
+        with self.assertRaises(ValueError):
+            to_anthropic_tools(defs=custom)
 
     def test_default_tools_use_active_registry_list(self) -> None:
         custom_defs = [

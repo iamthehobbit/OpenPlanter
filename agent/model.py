@@ -8,7 +8,13 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Protocol
 
-from .tool_defs import TOOL_DEFINITIONS, openai_tool_name_aliases, to_anthropic_tools, to_openai_tools
+from .tool_defs import (
+    TOOL_DEFINITIONS,
+    anthropic_tool_name_aliases,
+    openai_tool_name_aliases,
+    to_anthropic_tools,
+    to_openai_tools,
+)
 
 
 class ModelError(RuntimeError):
@@ -870,10 +876,16 @@ class AnthropicModel:
     def _is_opus_46(self) -> bool:
         return "opus-4-6" in self.model.lower() or "opus-4.6" in self.model.lower()
 
+    def _anthropic_tool_name_maps(self) -> tuple[dict[str, str], dict[str, str]]:
+        aliases = anthropic_tool_name_aliases(self.tool_defs)
+        reverse = {alias: canonical for canonical, alias in aliases.items()}
+        return aliases, reverse
+
     def complete(self, conversation: Conversation) -> ModelTurn:
         effort = (self.reasoning_effort or "").strip().lower()
         use_thinking = effort in {"low", "medium", "high"}
 
+        _tool_name_aliases, alias_to_canonical = self._anthropic_tool_name_maps()
         payload: dict[str, Any] = {
             "model": self.model,
             "max_tokens": self.max_tokens,
@@ -976,7 +988,7 @@ class AnthropicModel:
             if block_type == "tool_use":
                 tool_calls.append(ToolCall(
                     id=block.get("id", ""),
-                    name=block.get("name", ""),
+                    name=alias_to_canonical.get(str(block.get("name", "")), str(block.get("name", ""))),
                     arguments=block.get("input", {}) if isinstance(block.get("input"), dict) else {},
                 ))
             elif block_type == "text":

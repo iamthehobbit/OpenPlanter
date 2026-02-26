@@ -173,6 +173,47 @@ class ModelPayloadTests(unittest.TestCase):
             self.assertIn("thinking", calls[0])
             self.assertNotIn("thinking", calls[1])
 
+    def test_anthropic_aliases_dotted_tool_names_and_maps_back_to_canonical(self) -> None:
+        captured: dict = {}
+
+        def fake_http_json(url, method, headers, payload=None, timeout_sec=90):  # type: ignore[no-untyped-def]
+            captured["payload"] = payload
+            return {
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_1",
+                        "name": "redbook_catalog_snapshots",
+                        "input": {"dataset_id": "noaa_ghcn_daily"},
+                    }
+                ],
+                "stop_reason": "tool_use",
+            }
+
+        with patch("agent.model._http_stream_sse", mock_anthropic_stream(fake_http_json)):
+            model = AnthropicModel(
+                model="claude-haiku-4-5",
+                api_key="k",
+                tool_defs=[
+                    {
+                        "name": "redbook.catalog_snapshots",
+                        "description": "List snapshots",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"dataset_id": {"type": "string"}},
+                            "required": ["dataset_id"],
+                            "additionalProperties": False,
+                        },
+                    }
+                ],
+            )
+            conv = model.create_conversation("system", "user msg")
+            turn = model.complete(conv)
+            self.assertEqual(captured["payload"]["tools"][0]["name"], "redbook_catalog_snapshots")
+            self.assertEqual(len(turn.tool_calls), 1)
+            self.assertEqual(turn.tool_calls[0].name, "redbook.catalog_snapshots")
+            self.assertEqual(turn.tool_calls[0].arguments["dataset_id"], "noaa_ghcn_daily")
+
     def test_openai_maps_aliased_tool_call_name_back_to_canonical(self) -> None:
         def fake_http_json(url, method, headers, payload=None, timeout_sec=90):  # type: ignore[no-untyped-def]
             return {

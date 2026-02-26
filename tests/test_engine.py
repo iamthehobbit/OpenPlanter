@@ -12,7 +12,7 @@ from conftest import _tc
 from agent.config import AgentConfig
 from agent.engine import RLMEngine
 from agent.prompts import build_system_prompt as _build_system_prompt
-from agent.model import Conversation, ModelError, ModelTurn, ScriptedModel, ToolResult
+from agent.model import Conversation, ModelError, ModelTurn, OpenAICompatibleModel, ScriptedModel, ToolResult
 from agent.tool_defs import TOOL_DEFINITIONS
 from agent.tool_registry import ToolDefinition, ToolPlugin, ToolRegistry
 from agent.tools import WorkspaceTools
@@ -730,6 +730,33 @@ class ParallelExecutionTests(unittest.TestCase):
             result, ctx = engine.solve_with_context("allowlist allow")
             self.assertEqual(result, "done")
             self.assertTrue(any("ok" in obs for obs in ctx.observations))
+
+    def test_model_tool_defs_are_filtered_by_allowlist(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            cfg = AgentConfig(
+                workspace=root,
+                max_depth=1,
+                max_steps_per_call=2,
+                acceptance_criteria=False,
+                allowed_tool_patterns=("custom.*",),
+            )
+            tools = WorkspaceTools(root=root)
+            model = OpenAICompatibleModel(model="gpt-4.1-mini", api_key="k")
+            reg = ToolRegistry()
+            reg.register_plugin(
+                ToolPlugin(
+                    definition=ToolDefinition(
+                        name="custom.altdata",
+                        description="demo",
+                        parameters={"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+                    ),
+                    handler=lambda _a, _c: "ok",
+                )
+            )
+            engine = RLMEngine(model=model, tools=tools, config=cfg, tool_registry=reg)
+            names = [str(d["name"]) for d in getattr(model, "tool_defs", [])]
+            self.assertEqual(names, ["custom.altdata"])
 
 
 

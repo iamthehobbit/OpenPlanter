@@ -567,15 +567,20 @@ def _strict_fixup(schema: dict[str, Any]) -> None:
 _OPENAI_TOOL_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
 
 
-def openai_tool_name_alias(name: str) -> str:
-    """Return an OpenAI-compatible function name alias for a canonical tool name."""
+def provider_safe_tool_name_alias(name: str) -> str:
+    """Return a provider-safe alias for a canonical tool name (letters/digits/_/- only)."""
     if _OPENAI_TOOL_NAME_PATTERN.fullmatch(name):
         return name
     alias = re.sub(r"[^a-zA-Z0-9_-]", "_", name)
     alias = re.sub(r"_+", "_", alias).strip("_")
     if not alias:
-        raise ValueError(f"Tool name cannot be aliased for OpenAI: {name!r}")
+        raise ValueError(f"Tool name cannot be aliased safely: {name!r}")
     return alias
+
+
+def openai_tool_name_alias(name: str) -> str:
+    """Return an OpenAI-compatible function name alias for a canonical tool name."""
+    return provider_safe_tool_name_alias(name)
 
 
 def openai_tool_name_aliases(defs: list[dict[str, Any]] | None = None) -> dict[str, str]:
@@ -585,11 +590,30 @@ def openai_tool_name_aliases(defs: list[dict[str, Any]] | None = None) -> dict[s
     seen: dict[str, str] = {}
     for d in defs:
         canonical = str(d["name"])
-        alias = openai_tool_name_alias(canonical)
+        alias = provider_safe_tool_name_alias(canonical)
         prior = seen.get(alias)
         if prior is not None and prior != canonical:
             raise ValueError(
                 f"OpenAI tool-name alias collision: {prior!r} and {canonical!r} both map to {alias!r}"
+            )
+        seen[alias] = canonical
+        aliases[canonical] = alias
+    return aliases
+
+
+def anthropic_tool_name_aliases(defs: list[dict[str, Any]] | None = None) -> dict[str, str]:
+    """Map canonical tool names to Anthropic-safe aliases, validating collisions."""
+    # Anthropic currently rejects dotted names; same aliasing constraints as OpenAI are safe.
+    defs = defs if defs is not None else _active_tool_registry().list_definitions()
+    aliases: dict[str, str] = {}
+    seen: dict[str, str] = {}
+    for d in defs:
+        canonical = str(d["name"])
+        alias = provider_safe_tool_name_alias(canonical)
+        prior = seen.get(alias)
+        if prior is not None and prior != canonical:
+            raise ValueError(
+                f"Anthropic tool-name alias collision: {prior!r} and {canonical!r} both map to {alias!r}"
             )
         seen[alias] = canonical
         aliases[canonical] = alias
@@ -627,11 +651,12 @@ def to_anthropic_tools(
 ) -> list[dict[str, Any]]:
     """Convert provider-neutral definitions to Anthropic tools array format."""
     defs = defs if defs is not None else _active_tool_registry().list_definitions()
+    aliases = anthropic_tool_name_aliases(defs)
     tools: list[dict[str, Any]] = []
     for d in defs:
         tools.append(
             {
-                "name": d["name"],
+                "name": aliases.get(str(d["name"]), str(d["name"])),
                 "description": d["description"],
                 "input_schema": d["parameters"],
             }
